@@ -1,0 +1,159 @@
+========================================
+Spring EOSL 업그레이드 - 로컬 개발환경 구축 해결 과정
+========================================
+작성일: 2026-02-16
+프로젝트: plan-svc-lgcom (LGU+PLAN)
+환경: Windows + Eclipse (레거시) + Tomcat 8.0.38
+
+========================================
+[배경]
+========================================
+- 회사 보안클라우드(팔로알토 VPN) 환경에서 Spring EOSL 업그레이드 작업 중
+- 로컬 이클립스에서 Tomcat 기동 시 에러 발생
+- 개발기 서버: dplanwas1v (Linux, Tomcat 9.0.90, Java 8)
+- 로컬: Windows, Eclipse (레거시), Tomcat 8.0.38, Java 7
+
+========================================
+[문제 1] ClassNotFoundException: enc.SacmJdbcpoolDatasourceFactory
+========================================
+
+원인:
+  - Tomcat DataSource Factory 클래스(enc.SacmJdbcpoolDatasourceFactory)를 찾을 수 없음
+  - 처음에 WEB-INF/lib/에 JAR를 넣었으나, DataSource Factory는 Tomcat 클래스로더에서
+    로딩하므로 WEB-INF/lib/이 아닌 Tomcat 자체의 lib/에 있어야 함
+
+해결:
+  - 아래 JAR들을 Tomcat lib 폴더에 복사
+    경로: C:\LGU+PLAN\bin\apache-tomcat-8.0.38\lib\
+    - sacm-enc-jdbcpool.jar (7KB, 커스텀 암호화 JDBC Pool)
+    - jasypt-1.9.3.jar (139KB, Jasypt 암호화 라이브러리)
+    - commons-pool2-2.7.0.jar (127KB, Apache Commons Pool)
+
+참고 - sacm-enc-jdbcpool.jar 내부 클래스:
+  - CipherEncrypter.class (암/복호화 핵심)
+  - SacmFactoryUtil.class (팩토리 유틸)
+  - SacmJdbcpoolDatasourceFactory.class (Tomcat DataSource Factory)
+  - SimpleCrypto.class (단순 암호화 유틸)
+
+JAR 출처:
+  - 개발기 서버의 Tomcat_DS_pw_Encrypt 디렉토리에서 확보
+  - sacm-enc-jdbcpool.jar을 알집으로 열면 enc/ 폴더 내 4개 클래스 확인 가능
+
+========================================
+[문제 2] UnsupportedClassVersionError: major.minor version 52.0
+========================================
+
+원인:
+  - sacm-enc-jdbcpool.jar가 Java 8(version 52.0)로 컴파일됨
+  - 로컬 Tomcat이 Java 7로 실행 중이라 클래스 로딩 불가
+
+해결:
+  - JDK 8 설치: jdk-8u71-windows-x64.exe (로컬에 이미 설치파일 보유)
+    설치 경로: C:\Program Files\Java\jdk1.8.0_71
+  - 이클립스에 JDK 8 등록:
+    Window → Preferences → Java → Installed JREs → Add → Standard VM
+    JRE home: C:\Program Files\Java\jdk1.8.0_71
+  - Tomcat 서버에 JDK 8 연결:
+    Servers 뷰 → 서버 더블클릭 → Runtime Environment → JRE를 jdk1.8.0_71로 변경
+
+참고:
+  - "Add JRE" 화면이지만 JDK 경로를 넣으면 됨 (JDK가 JRE 포함)
+  - 이클립스가 레거시라 Tomcat 9.0 선택지가 없음 → Tomcat 8.0으로 유지
+
+========================================
+[문제 3] NameNotFoundException: Name [jdbc/lgpla] is not bound
+========================================
+
+원인:
+  - JNDI DataSource jdbc/lgpla가 Tomcat에 등록되지 않음
+  - 개발기에서는 server.xml + context.xml 조합으로 설정되어 있었음
+
+해결:
+  1) 이클립스 Servers/LGPLA-config/server.xml의 <GlobalNamingResources> 섹션에 추가:
+
+     <!-- DUSIS -->
+     <Resource name="DUSIS" auth="Container"
+         type="javax.sql.DataSource" driverClassName="oracle.jdbc.OracleDriver"
+         factory="enc.SacmJdbcpoolDatasourceFactory"
+         url="jdbc:oracle:thin:@172.21.21.162:1525:DUSIS"
+         username="w4TcZea6Z5JCr1JM92zW7w==" password="Ue7uJvodSt7d3jC/unrU6PMMacT5ReZU69SziLHI95A="
+         initialSize="10" maxActive="100" maxIdle="100" maxWait="30000" minIdle="10"
+         validationQuery="SELECT 1 FROM DUAL" testOnBorrow="true"
+         validationQueryTimeout="60" minEvictableIdleTimeMillis="60000"
+         timeBetweenEvictionRunsMillis="60000" testWhileIdle="true"
+         removeAbandoned="true" removeAbandonedTimeout="60" logAbandoned="true" />
+
+  2) 이클립스 Servers/LGPLA-config/context.xml의 </Context> 직전에 추가:
+
+     <ResourceLink global="DUSIS" name="jdbc/lgpla" type="javax.sql.DataSource"/>
+
+구조 설명:
+  - server.xml GlobalNamingResources → 실제 DataSource "DUSIS" 정의
+  - context.xml ResourceLink → "DUSIS"를 "jdbc/lgpla"로 매핑
+  - Spring 코드에서 "jdbc/lgpla"로 JNDI lookup
+
+========================================
+[문제 4] NamingException (DataSource 생성 실패)
+========================================
+
+원인:
+  - 네트워크는 정상 (Test-NetConnection 172.21.21.162:1525 → TcpTestSucceeded: True)
+  - SacmJdbcpoolDatasourceFactory가 암호화된 username/password를 복호화하려면
+    Jasypt 암호화 키가 필요한데, JVM 인자로 전달되지 않았음
+  - 개발기에서는 -Djasypt.encryptor.password=1111111111111111 로 전달하고 있었음
+
+해결:
+  - 이클립스 Tomcat Launch Configuration에 JVM 인자 추가:
+    서버 우클릭 → Open launch configuration → Arguments 탭 → VM arguments 끝에 추가:
+    -Djasypt.encryptor.password=1111111111111111
+  - Apply → OK → Clean → Start
+
+========================================
+[최종 환경 요약]
+========================================
+
+항목                  값
+------------------   ----------------------------------------
+Eclipse              레거시 (Tomcat 8.0까지만 지원)
+Tomcat               8.0.38 (C:\LGU+PLAN\bin\apache-tomcat-8.0.38)
+Java                 JDK 1.8.0_71
+DB                   Oracle (172.21.21.162:1525, SID: DUSIS)
+암호화               Jasypt + SacmJdbcpoolDatasourceFactory
+
+Tomcat lib에 추가한 JAR:
+  - sacm-enc-jdbcpool.jar
+  - jasypt-1.9.3.jar
+  - commons-pool2-2.7.0.jar
+  - ojdbc6-11.1.0.7.0.jar (기존에 있었음)
+
+VM arguments:
+  -Djasypt.encryptor.password=1111111111111111
+
+========================================
+[개발기 서버 참고 정보]
+========================================
+
+호스트:        dplanwas1v
+Tomcat 경로:   /engn/was/tomcat_lguservice
+인스턴스:      /engn/was/tomcat_lguservice/servers/nplan_dev_11
+Java:          /usr/lib/jvm/java-1.8.0-openjdk
+Tomcat 버전:   9.0.90
+Listen IP:     172.21.31.241
+
+========================================
+[교훈 및 참고사항]
+========================================
+
+1. DataSource Factory JAR는 WEB-INF/lib/이 아닌 Tomcat lib/에 넣어야 한다
+   → Tomcat JNDI는 Tomcat 클래스로더에서 동작하므로 웹앱 클래스패스 참조 불가
+
+2. Java 버전 불일치 시 UnsupportedClassVersionError 발생
+   → major.minor version 52.0 = Java 8로 컴파일된 클래스
+
+3. Jasypt 암호화 사용 시 -Djasypt.encryptor.password JVM 인자 필수
+   → 개발기 ps -ef | grep tomcat 으로 기존 JVM 인자 확인 가능
+
+4. 레거시 이클립스에서 상위 버전 Tomcat 연결 시 버전 체크로 막힘
+   → Tomcat 8.0 설정으로 유지하고 lib/conf만 맞추는 것이 현실적
+
+5. JAR 파일은 ZIP과 동일 → 알집 등으로 내부 확인 가능

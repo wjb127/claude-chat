@@ -1,0 +1,196 @@
+========================================
+NERP 서비스 (nerp-svc-lgcom) - 로컬 개발환경 구축 해결 과정
+========================================
+작성일: 2026-02-17
+프로젝트: nerp-svc-lgcom (LGU+ WAF)
+환경: Windows + Eclipse (레거시) + Tomcat 8.0.38
+참고: PLAN 서비스(plan-svc-lgcom) 환경을 기반으로 NERP 환경 구축
+
+========================================
+[배경]
+========================================
+- PLAN 서비스는 이미 로컬 환경이 구축된 상태
+- NERP 서비스(nerp-svc-lgcom)를 별도 Tomcat 인스턴스로 로컬에 올려야 함
+- DB 계정이 PLAN과 다르므로 별도 서버 구성 필요
+- Tomcat 경로: C:\LGU+WAF\bin\apache-tomcat-8.0.38
+
+========================================
+[문제 1] Port 8005 already in use
+========================================
+
+원인:
+  - 기존 Tomcat 프로세스가 완전 종료되지 않아 shutdown 포트(8005) 충돌
+
+해결:
+  - 이클립스 Tomcat 서버 설정 → Ports 섹션
+  - Tomcat admin port: 8005 → 8006으로 변경
+  - (또는 cmd에서 netstat -ano | findstr 8005 → taskkill /F /PID [PID])
+
+========================================
+[문제 2] NullPointerException at SimpleCrypto.generateKey
+========================================
+
+원인:
+  - SacmJdbcpoolDatasourceFactory가 암호화된 DB 계정을 복호화할 때
+    Jasypt 암호화 키가 JVM에 전달되지 않아 NPE 발생
+  - 스택트레이스:
+    enc.SimpleCrypto.generateKey → enc.SimpleCrypto.decrypt
+    → enc.SacmFactoryUtil.findAndReplaceDecrypt
+
+해결:
+  - 이클립스 Tomcat Launch Configuration → Arguments 탭 → VM arguments에 추가:
+    -Djasypt.encryptor.password=1111111111111111
+  - PLAN 서비스의 [문제 4]와 동일한 케이스
+
+========================================
+[문제 3] DB 연결 실패 (The Network Adapter could not establish the connection)
+========================================
+
+원인:
+  - server.xml의 DB URL이 예전 주소로 되어있었음
+
+해결:
+  - server.xml의 <Resource> 태그에서 url을 현재 개발기 DB 주소로 수정
+  - url="jdbc:oracle:thin:@172.21.21.162:1525:DUSIS"
+
+========================================
+[문제 4] localhost:8080 접속 시 404 (Tomcat 기본 페이지도 안 뜸)
+========================================
+
+원인:
+  - 이클립스 Server Locations가 "Use workspace metadata"로 설정되어 있어
+    웹앱이 제대로 배포되지 않음
+  - 배포 로그에 nerp-svc-lgcom 관련 내용이 전혀 없었음
+
+해결:
+  1) 모듈 Remove
+  2) Server Locations → "Use Tomcat installation" 선택
+  3) 저장 후 모듈 다시 Add
+  4) Clean → Start
+  → Tomcat 기본 페이지(고양이) 정상 표시 확인
+
+참고:
+  - Server Locations 변경은 모듈이 없고 서버가 Clean 상태일 때만 가능
+  - [Stopped, Republish] 상태에서는 변경 불가 → 우클릭 → Clean 먼저 수행
+
+========================================
+[문제 5] localhost:8080/lgcom 접속 시 404
+========================================
+
+원인:
+  - server.xml에 Context 설정이 없어서 /lgcom 경로로 앱이 매핑되지 않음
+  - PLAN 서버의 server.xml에는 Context 태그가 있었으나 NERP 서버에는 없었음
+
+해결:
+  - Servers/Tomcat v8.0 Server at localhost-config/server.xml 편집
+  - <Host> 태그 안, </Engine> 직전에 추가:
+    <Context docBase="nerp-svc-lgcom" path="/lgcom" reloadable="true"
+             source="org.eclipse.jst.jee.server:nerp-svc-lgcom"/>
+
+참고 - PLAN 서버 server.xml의 설정 (정상 동작 참고):
+  <Context docBase="plan-svc-lgcom" path="/lgcom" reloadable="true"
+           source="org.eclipse.jst.jee.server:plan-svc-lgcom"/>
+  <Context docBase="plan-svc-lgpla" path="/lgpla" reloadable="true"
+           source="org.eclipse.jst.jee.server:plan-svc-lgpla"/>
+
+========================================
+[문제 6] Publishing failed - JAR 파일을 찾을 수 없음
+========================================
+
+원인:
+  - NERP의 Maven 로컬 저장소(C:\LGU+WAF\maven\repository)에
+    log4j 등 라이브러리 JAR이 없었음
+  - 에러: "Error reading file ... log4j-slf4j-impl-2.24.2.jar (지정된 경로를 찾을 수 없습니다)"
+
+해결:
+  - PLAN의 Maven 저장소를 NERP로 복사:
+    복사 원본: C:\LGU+PLAN\maven\repository\
+    복사 대상: C:\LGU+WAF\maven\repository\
+  - 중복 파일은 건너뛰기(Skip)로 처리
+  - (또는 Maven Update Project: 프로젝트 우클릭 → Maven → Update Project)
+
+========================================
+[문제 7] Deployment Assembly 설정 누락 (핵심 원인)
+========================================
+
+원인:
+  - nerp-svc-lgcom의 Web Deployment Assembly에 핵심 매핑이 빠져있었음
+  - PLAN과 비교 시 Maven Dependencies, framework JAR, webapp 매핑 등이 누락
+
+PLAN (정상) Deployment Assembly:
+  /src/main/java              → WEB-INF/classes
+  /src/main/resources         → WEB-INF/classes
+  /src/main/webapp            → /
+  /target/m2e-wtp/web-resources → /
+  Maven Dependencies          → WEB-INF/lib
+  plan-fw-lgcom               → WEB-INF/lib/plan-fw-lgcom.jar
+
+NERP (수정 전 - 문제 상태):
+  /src/main/java              → WEB-INF/classes
+  /src/main/resources         → WEB-INF/classes
+  /src/test/java              → WEB-INF/classes  ← 불필요
+  /WebContent                 → /
+
+NERP (수정 후 - 정상 동작):
+  /src/main/java              → WEB-INF/classes
+  /src/main/resources         → WEB-INF/classes
+  /src/main/webapp            → /                ← 추가
+  /WebContent                 → /
+  Maven Dependencies          → WEB-INF/lib      ← 추가
+  plan-fw-lgcom               → WEB-INF/lib/plan-fw-lgcom.jar  ← 추가
+
+수정 방법:
+  프로젝트 우클릭 → Properties → Deployment Assembly
+  1) Add → Java Build Path Entries → Maven Dependencies (Deploy: WEB-INF/lib)
+  2) Add → Project → plan-fw-lgcom (Deploy: WEB-INF/lib/plan-fw-lgcom.jar)
+  3) Add → Folder → /src/main/webapp (Deploy: /)
+  4) /src/test/java 선택 → Remove
+  5) Apply → OK
+
+========================================
+[최종 환경 요약]
+========================================
+
+항목                  값
+------------------   ----------------------------------------
+Eclipse              레거시 (Tomcat 8.0까지만 지원)
+Tomcat               8.0.38 (C:\LGU+WAF\bin\apache-tomcat-8.0.38)
+Java                 JDK 1.8.0_71
+DB                   Oracle (172.21.21.162:1525, SID: DUSIS)
+암호화               Jasypt + SacmJdbcpoolDatasourceFactory
+Maven 저장소         C:\LGU+WAF\maven\repository
+접속 URL             http://localhost:8080/lgcom
+
+Ports:
+  - Tomcat admin port: 8006
+  - HTTP/1.1: 8080
+  - AJP/1.3: 8009
+
+VM arguments:
+  -Djasypt.encryptor.password=1111111111111111
+
+Server Locations:
+  - "Use workspace metadata" 모드
+  - Deploy path: wtpwebapps
+
+========================================
+[교훈 및 참고사항]
+========================================
+
+1. Eclipse WTP에서 웹앱 배포가 안 될 때 Deployment Assembly를 가장 먼저 확인
+   → Maven Dependencies, framework 프로젝트 매핑이 빠져있으면 빈 앱이 배포됨
+
+2. server.xml에 <Context> 태그가 없으면 컨텍스트 경로가 매핑되지 않음
+   → 기존 정상 동작 서버의 server.xml을 참고하여 동일 패턴으로 추가
+
+3. 별도 Tomcat 인스턴스 구성 시 Maven 로컬 저장소도 동기화 필요
+   → 기존 환경의 repository 폴더를 복사하면 빠름 (중복 건너뛰기)
+
+4. StandardServer.await: Invalid command 'GET /...' 에러는
+   → 브라우저가 shutdown 포트(8005/8006)로 접속한 것 → HTTP 포트(8080)로 접속해야 함
+
+5. Server Locations 변경은 모듈 제거 + Clean 상태에서만 가능
+   → [Stopped, Republish] 상태에서는 옵션이 비활성화됨
+
+6. 동일 프레임워크(plan-fw-lgcom)를 여러 서비스에서 공유 가능
+   → Deployment Assembly에서 Project 참조로 추가
